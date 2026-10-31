@@ -1,0 +1,270 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MerchantStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+enum PaymentOrderStatus {
+  CREATED
+  PENDING
+  PARTIALLY_PAID
+  PAID
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentAttemptStatus {
+  INITIATED
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum PaymentAttemptMethod {
+  WALLET
+  GATEWAY
+  HYBRID
+}
+
+enum WalletTransactionType {
+  TOP_UP
+  RESERVE
+  RELEASE
+  DEBIT
+  CREDIT
+  REFUND
+}
+
+enum LedgerEntryType {
+  WALLET_TOP_UP
+  WALLET_RESERVE
+  WALLET_RELEASE
+  WALLET_DEBIT
+  WALLET_REFUND
+  PAYMENT_CAPTURE
+  REFUND_PROCESSED
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum IdempotencyScope {
+  PAYMENT
+  REFUND
+}
+
+model Merchant {
+  id           String         @id @default(cuid())
+  businessName String
+  email        String         @unique
+  passwordHash String
+  status       MerchantStatus @default(ACTIVE)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  paymentOrders PaymentOrder[]
+  refunds       Refund[]
+
+  @@index([email])
+}
+
+model Customer {
+  id           String         @id @default(cuid())
+  fullName     String
+  email        String         @unique
+  passwordHash String
+  status       CustomerStatus @default(ACTIVE)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  wallet          Wallet?
+  paymentOrders   PaymentOrder[]
+  paymentAttempts PaymentAttempt[]
+  refunds         Refund[]
+
+  @@index([email])
+}
+
+model Wallet {
+  id              String   @id @default(cuid())
+  customerId      String   @unique
+  balance         Int      @default(0) // available balance in minor units
+  reservedBalance Int      @default(0) // reserved/held amount in minor units
+  currency        String   @default("INR")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  customer      Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  transactions  WalletTransaction[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([customerId])
+}
+
+model WalletTransaction {
+  id            String                @id @default(cuid())
+  walletId      String
+  type          WalletTransactionType
+  amount        Int // in minor units
+  balanceAfter  Int // wallet available balance after this operation
+  reservedAfter Int // reserved balance after this operation
+  reference     String? // payment order id / refund id / topup ref etc.
+  description   String?
+  createdAt     DateTime              @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@index([type])
+  @@index([reference])
+}
+
+model LedgerEntry {
+  id             String          @id @default(cuid())
+  walletId       String
+  paymentOrderId String?
+  refundId       String?
+  type           LedgerEntryType
+  amount         Int // in minor units
+  description    String?
+  createdAt      DateTime        @default(now())
+
+  wallet       Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  paymentOrder PaymentOrder? @relation(fields: [paymentOrderId], references: [id])
+  refund       Refund?       @relation(fields: [refundId], references: [id])
+
+  @@index([walletId])
+  @@index([paymentOrderId])
+  @@index([refundId])
+  @@index([type])
+}
+
+model PaymentOrder {
+  id         String             @id @default(cuid())
+  merchantId String
+  customerId String
+  orderRef   String             @unique
+  amount     Int // total order amount in minor units
+  currency   String             @default("INR")
+  status     PaymentOrderStatus @default(CREATED)
+
+  walletAmountUsed  Int @default(0) // amount reserved/debited from wallet
+  gatewayAmountUsed Int @default(0) // amount paid via external gateway
+  refundedAmount Int @default(0)
+  
+  description String?
+  metadata    Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchant        Merchant         @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  customer        Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  paymentAttempts PaymentAttempt[]
+  refunds         Refund[]
+  ledgerEntries   LedgerEntry[]
+
+  @@index([merchantId])
+  @@index([customerId])
+  @@index([status])
+  @@index([orderRef])
+}
+
+model PaymentAttempt {
+  id             String @id @default(cuid())
+  paymentOrderId String
+  customerId     String
+
+  method PaymentAttemptMethod
+  status PaymentAttemptStatus @default(INITIATED)
+
+  amount        Int // total attempt amount
+  walletAmount  Int @default(0)
+  gatewayAmount Int @default(0)
+
+  gatewayProvider  String? // e.g. "mock", "razorpay"
+  gatewayReference String? // external payment id / txn id
+
+  failureReason String?
+  metadata      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  paymentOrder PaymentOrder @relation(fields: [paymentOrderId], references: [id], onDelete: Cascade)
+  customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([paymentOrderId])
+  @@index([customerId])
+  @@index([status])
+  @@index([gatewayReference])
+}
+
+model Refund {
+  id             String @id @default(cuid())
+  paymentOrderId String
+  merchantId     String
+  customerId     String
+
+  amount               Int // total refund amount in minor units
+  walletRefundAmount   Int @default(0)
+  gatewayRefundAmount  Int @default(0)
+
+  status RefundStatus @default(PENDING)
+  reason String?
+
+  gatewayProvider        String?
+  gatewayRefundReference String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  paymentOrder  PaymentOrder  @relation(fields: [paymentOrderId], references: [id], onDelete: Cascade)
+  merchant      Merchant      @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  customer      Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  ledgerEntries LedgerEntry[]
+
+  @@index([paymentOrderId])
+  @@index([merchantId])
+  @@index([customerId])
+  @@index([status])
+}
+
+model IdempotencyKey {
+  id String @id @default(cuid())
+
+  key         String
+  scope       IdempotencyScope
+  actorId     String
+  requestHash String
+
+  statusCode Int
+  response   Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([key, scope, actorId])
+  @@index([scope, actorId])
+  @@index([createdAt])
+}
